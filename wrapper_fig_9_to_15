@@ -1,0 +1,400 @@
+% -------------------------------------------------------------------------
+% The MIT License (MIT)
+% 
+% Copyright (c) [2015] [Matthew Crooks]
+% 
+% Permission is hereby granted, free of charge, to any person obtaining a copy
+% of this software and associated documentation files (the "Software"), to deal
+% in the Software without restriction, including without limitation the rights
+% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+% copies of the Software, and to permit persons to whom the Software is
+% furnished to do so, subject to the following conditions:
+% 
+% The above copyright notice and this permission notice shall be included in all
+% copies or substantial portions of the Software.
+% 
+% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+% SOFTWARE.
+% -------------------------------------------------------------------------
+
+% -------------------------------------------------------------------------
+% This code is a wrapper script that generates the comparisons graphs with
+% the parcel model.
+% -------------------------------------------------------------------------
+
+% -------------------------------------------------------------------------
+% Code dependencies:
+% svp.m
+% SOA_condensed_multiple_mode_fast_from_given_vapour
+% co_condensation_3_multiple_mode_fast_equilibriate2
+% co_condensation_3_multiple_mode_fast_equilibriate_seperate
+% -------------------------------------------------------------------------
+
+
+
+
+clear
+
+
+
+    
+
+
+
+Org_frac=0.9;
+
+    
+    
+    % set number of mades to 2
+    num_modes=2;
+    % set number concentrations
+    n_aerosols=[200 50]*1e6;
+    % set median diameter of core aerosol particles
+    sz=[25 125]*1e-9;
+    
+    % set geometric standard deviation
+    sig_aer=[0.5 0.1];
+    
+    
+     
+     
+    % scaling sv content
+     Morg_in_bin=0.25*[0.005 0.01 0.02 0.03 0.06 0.08 0.16 0.3 0.42 0.8];
+     % set density, molecualr weight and van't Hoff factor for core aerosol
+     % and organics. First 2 entires are the core modes, the next 10 are
+     % the organics.
+     rhoa=[1770+0*500*rand(1,1)*ones(1,length(n_aerosols)),1500+0*1000*rand(1,length(Morg_in_bin))];
+     Ma=[0.132+0*0.1*rand(1,1)*ones(1,length(n_aerosols)),0.2+0*0.1*rand(1,length(Morg_in_bin))];
+     nu=[3*ones(1,length(n_aerosols)),1+0*rand(1,length(Morg_in_bin))];
+     
+     % set relative humidity
+     RH=0.0;
+    
+    % Run without shifting sig_aer, errors is the median diameter and
+    % sig_aer calculated by shifting sig_aer after calculating Cij
+   [d_aer,sig_aer_out,Cij,org_frac,errors,Cond_mass_array]=...
+    SOA_condensed_multiple_mode_fast_from_given_vapour(0,n_aerosols,[sz,sig_aer],...
+    Morg_in_bin,rhoa,Ma,nu,RH);
+
+    
+
+
+
+
+    
+    
+    
+    
+    
+% NB: parcel model code was originally writen by Topping et al. (2013) and 
+% modified for the current work. These additional codes have not been
+% commented for the current paper accordingly. 
+
+        % run the parcel model with just the large particles allowed to
+        % interact with the organic vapours. The time allowed for this
+        % process in controlled by tfinal in 
+        % co_condensation_3_multiple_mode_fast_equilibriate2
+        tstart=0;
+        save initial_vals tstart
+        
+        % run this first model to establish the IC for the second
+        [TOUT,YOUT,vars] = ...
+                co_condensation_3_multiple_mode_fast_equilibriate2(0,n_aerosols,[sz sig_aer],1,RH,Morg_in_bin*1e-9,0*Cond_mass_array);
+        initial_vals=YOUT(end,:)';
+        
+        num_bins=length(vars.N);
+        
+        % store final values from this parcel run into the variable
+        % initial_vals to be used as initial conditions for the second
+        % simulation
+        for i=1:length(Morg_in_bin)
+            initial_vals(num_bins*(i)+(num_bins+5+length(Morg_in_bin)):(num_bins+4+length(Morg_in_bin))+(i+1)*num_bins)=...
+                [YOUT(end,num_bins*(i)+(num_bins+5+length(Morg_in_bin)):(num_bins+4+length(Morg_in_bin))+(i+1)*num_bins)...
+                .*(vars.N_each(:,2)'./vars.N_each(end,2))];
+        end
+        
+        
+        % Now run the parcel model allowing the organic vapours to
+        % condensed and evaporate off both modes using the output from the
+        % previous run as an initial condition. The time allowed for this
+        % process in controlled by tfinal in 
+        % co_condensation_3_multiple_mode_fast_equilibriate_seperate
+        
+            tstart=TOUT(end);
+            % save ICs to be loaded in the parcel model co_cond..._seperate
+            save initial_vals initial_vals tstart
+            
+            vars.N_each(vars.N_each<10)=10;
+            
+            % calculate the condensed mass to be used as an IC
+            Cond_mass=0*Morg_in_bin;
+            for i=1:length(Morg_in_bin)
+                Cond_mass(i)=sum(YOUT(end,num_bins*i+(num_bins+5+length(Morg_in_bin)):(num_bins+4+length(Morg_in_bin))+(i+1)*num_bins).*(vars.N_each(:,2)./(1+0*sum(vars.N_each,2)))',2).*vars.factor;
+            end
+        
+            % run second parcel model run
+        [TOUT,YOUT,vars] = ...
+            co_condensation_3_multiple_mode_fast_equilibriate_seperate(0,n_aerosols,[sz,sig_aer],1,RH,Morg_in_bin*1e-9,Cond_mass);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+n=num_bins;
+num_org=length(Morg_in_bin);
+
+% Calc final condensed mass in each size bin from parcel model
+Xfinal=[sum(YOUT(end,n+(n+5+num_org):(n+4+num_org)+2*n).*vars.N(2),2)*1e9];
+for i=2:num_org
+    Xfinal=[Xfinal,sum(YOUT(end,n*i+(n+5+num_org):(n+4+num_org)+(i+1)*n).*vars.N(2),2)*1e9];
+end
+
+
+
+
+
+%Calc cond mass condensed mass in each size bin from parcel model t
+X=[sum(YOUT(:,n+(n+5+num_org):(n+4+num_org)+2*n).*vars.N(2),2)*1e9];
+for i=2:length(Morg_in_bin)
+    X=[X,sum(YOUT(:,n*i+(n+5+num_org):(n+4+num_org)+(i+1)*n).*vars.N(2),2)*1e9];
+end
+    
+
+
+% Calc cond mass condensed mass in each size bin from parcel model t on two 
+modes seperately
+X1=[sum(YOUT(:,n+(n+5+length(Morg_in_bin)):(n+4+length(Morg_in_bin))+2*n).*repmat(vars.N_each(:,1)',length(TOUT),1),2)*1e9];
+for i=2:length(Morg_in_bin)
+    X1=[X1,sum(YOUT(:,n*i+(n+5+length(Morg_in_bin)):(n+4+length(Morg_in_bin))+(i+1)*n).*repmat(vars.N_each(:,1)',length(TOUT),1),2)*1e9];
+end
+
+X2=[sum(YOUT(:,n+(n+5+length(Morg_in_bin)):(n+4+length(Morg_in_bin))+2*n).*repmat(vars.N_each(:,2)',length(TOUT),1),2)*1e9];
+for i=2:length(Morg_in_bin)
+    X2=[X2,sum(YOUT(:,n*i+(n+5+length(Morg_in_bin)):(n+4+length(Morg_in_bin))+(i+1)*n).*repmat(vars.N_each(:,2)',length(TOUT),1),2)*1e9];
+end
+
+
+close all
+
+% -------------------------------------------------------------------------
+% plot total condensed concentrations across all modes from the second
+% parcel model against the partitioning solution. cf Figure 12
+% -------------------------------------------------------------------------
+
+plot(TOUT,X,'linewidth',2)
+hold on
+% plot(repmat([1;TOUT(end)],1,length(Morg_in_bin)),...
+% repmat(sum(Cond_mass_array)*1e9./1.1292,2,1),'--','linewidth',2)
+plot(repmat([1;TOUT(end)],1,length(Morg_in_bin)),...
+repmat(sum(Cond_mass_array)*1e9./1.1292,2,1),'-.','linewidth',2)
+
+XTick=[0:1000:10000];
+xlabel('time (s)','FontSize',14)
+ylabel('condensed concentration (\mu mol m^{-3})','FontSize',14)
+title({'Comparison of total condensed concentration from parcel model (solid line) against', ...
+'partition theory with shifted \sigma (dashed line) and without sifted \sigma (dot dashed), RH=50%'},'FontSize',14)
+
+
+ % ------------------------------------------------------------------------
+ % plot size distributions, cf Figure 15
+ % ------------------------------------------------------------------------
+ figure
+ 
+ % plot size dist of wet aerosol - can't be bothered changing this later on
+ dry_aerosol_size=vars.dry_aerosol_size;
+ vars.dry_aerosol_size=vars.wet_aerosol_size;
+ 
+ 
+% The 1e-6 changes to pcc
+if RH==0
+    subplot(2,2,1)
+elseif RH==0.1
+    subplot(2,2,2)
+elseif RH==0.5
+    subplot(2,2,3)
+else
+    subplot(2,2,4)
+end
+
+% create the initial size distribution for the parcel model
+ dD=diff(log(vars.D));
+ x=linspace(1e-9,max(vars.wet_aerosol_size(end,:)),300);
+ 
+ dN_dlogd=0*x;
+ for i=1:num_modes
+    dN_dlogd=dN_dlogd+n_aerosols(i).*x.*lognpdf(x,log(sz(i)),sig_aer(i));
+ end
+ 
+% plot initial size distributions
+plot(x,1e-6*dN_dlogd,'--','Color',[0.847058832645416 0.160784319043159 0],'linewidth',3)
+hold on
+plot(vars.D(2:end)-0.5*diff(vars.D),1e-6*vars.N(2)./dD,'x','Markersize',10,'linewidth',2,...
+    'Color',[0.0392156876623631 0.141176477074623 0.415686279535294])
+
+% parcel at equilibrium
+ dDend=diff(log(vars.dry_aerosol_size(end,:)));
+plot(vars.dry_aerosol_size(end,2:end),1e-6*vars.N(2)./dDend,'linewidth',3,...
+    'Color',[0.0392156876623631 0.141176477074623 0.415686279535294])
+hold on
+
+
+% part with post shift in sig_aer. ie calculate equilibrium assuming
+% sig_aer constant and then add it on assuming the geometric standard deviation
+% changes but the arithmetic remains constant. This maintains the height of
+% the size distribution. The new geometric standard deviation and median
+% diameter are stored in errors output from equilibrium partitioning
+% theory.
+
+% Sum together the size distribution of the two modes combined.
+dN_dlogd=0*x;
+for i=1:num_modes
+    dN_dlogd=dN_dlogd+n_aerosols(i).*x.*lognpdf(x,log(errors.dm_wet(i)),errors.sig_aer_wet(i));
+end
+% plot size distribution from partitioning theory
+plot(x,1e-6*dN_dlogd,'Color',[0.847058832645416 0.160784319043159 0],'linewidth',3)
+
+p=gca;
+set(p,'XTick',0:40e-9:200e-9);
+set(p,'XTicklabel',{'0','40','80','120','160','200'});
+xlabel({'','','x'})
+ylabel({'y','',''})
+box on
+xlim([0 200e-9])
+ylim([0 300])
+
+% set(p,'XTick',0:40:200);
+set(p,'YTick',0:50:300);
+
+
+% title({'Comparison of size distributions. Solid lines are intial values (blue: parcel, black: partition)',... 
+% 'Dashed lines at equilibrium (blue: parcel, red: no shift \sigma, green: post shift \sigma, black: shifted \sigma)'},'FontSize',14)
+
+% -------------------------------------------------------------------------
+% plot individual condensed concentrations on each mode, cf Figure 9, 13
+% -------------------------------------------------------------------------
+
+figure
+subplot(2,2,3)
+plot1 = plot(TOUT,X1,'linewidth',2);
+hold on
+% plot(repmat([1;TOUT(end)],1,length(Morg_in_bin)),...
+% repmat(Cond_mass_array(1,:)*1e9./1.1292,2,1),'-.','linewidth',2)
+plot2 = plot(repmat([1;TOUT(end)],1,length(Morg_in_bin)),...
+repmat(Cond_mass_array(1,:)*1e9./1.1292,2,1),'--','linewidth',2,'markersize',2);
+XTick=[0:1000:10000];
+title('C')
+xlabel({'','','x'})
+ylabel({'y','',''})
+
+set(plot2(8),'Color',[1 0.600000023841858 0.7843137383461]);
+set(plot2(9),'Color',[1 0.694117665290833 0.39215686917305]);
+set(plot2(10),...
+    'Color',[0.729411780834198 0.831372559070587 0.95686274766922]);
+set(plot1(8),'Color',[1 0.600000023841858 0.7843137383461]);
+set(plot1(9),'Color',[1 0.694117665290833 0.39215686917305]);
+set(plot1(10),...
+    'Color',[0.729411780834198 0.831372559070587 0.95686274766922]);
+% title({'Comparison of condensed concentration on first mode',...
+% 'from parcel model (solid line) against', ...
+% 'partition theory with shifted \sigma (dashed line)', ...
+% 'and without sifted \sigma (dots), RH=50%'},'FontSize',14)
+p=gca;
+set(p,'XTick',0:5000:20000);
+set(p,'XTickLabel',{'0','5000','10000','15000','20000'});
+set(p,'YTick',0:0.0005:2.5e-3);
+set(p,'YTickLabel',{'0','0.5','1','1.5','2','2.5'});
+
+subplot(2,2,4)
+plot3=plot(TOUT,X2,'linewidth',2);
+hold on
+% plot(repmat([1;TOUT(end)],1,length(Morg_in_bin)),...
+% repmat(Cond_mass_array(2,:)*1e9./1.1292,2,1),'-.','linewidth',2)
+plot4=plot(repmat([1;TOUT(end)],1,length(Morg_in_bin)),...
+repmat(Cond_mass_array(2,:)*1e9./1.1292,2,1),'--','linewidth',2,'markersize',2);
+XTick=[0:1000:10000];
+title('D')
+xlabel({'','','x'})
+ylabel({'y','',''})
+% title({'Comparison of condensed concentration on second mode',...
+% 'from parcel model (solid line) against', ...
+% 'partition theory with shifted \sigma (dashed line)', ...
+% 'and without sifted \sigma (dots), RH=50%'},'FontSize',14)
+
+set(plot3(8),'Color',[1 0.600000023841858 0.7843137383461]);
+set(plot3(9),'Color',[1 0.694117665290833 0.39215686917305]);
+set(plot3(10),...
+    'Color',[0.729411780834198 0.831372559070587 0.95686274766922]);
+set(plot4(8),'Color',[1 0.600000023841858 0.7843137383461]);
+set(plot4(9),'Color',[1 0.694117665290833 0.39215686917305]);
+set(plot4(10),...
+    'Color',[0.729411780834198 0.831372559070587 0.95686274766922]);
+
+p=gca;
+set(p,'XTick',0:5000:20000);
+set(p,'XTickLabel',{'0','5000','10000','15000','20000'});
+set(p,'YTick',0:0.005:2.5e-2);
+set(p,'YTickLabel',{'0','5','10','15','20','25'});
+
+% -------------------------------------------------------------------------
+% plot bar chart of condensed masses, cf Figure 10, 11
+% -------------------------------------------------------------------------
+
+figure
+
+
+if RH==0
+    subplot(2,2,1)
+elseif RH==0.1
+    subplot(2,2,2)
+elseif RH==0.5
+    subplot(2,2,3)
+else
+    subplot(2,2,4)
+end
+    
+    
+hold on
+bar(Xfinal(end,:))
+bar(Morg_in_bin./1.1292,'FaceColor',[0.39215686917305 0.474509805440903 0.635294139385223])
+bar(Xfinal(end,:),'FaceColor',[0.847058832645416 0.160784319043159 0])
+
+bar(X1(end,:),'FaceColor',[0.168627455830574 0.505882382392883 0.337254911661148])
+
+for i=1:length(Morg_in_bin)
+    plot([i-0.4 i+0.4],[X2(end,i) X2(end,i)],'--k','Linewidth',2)
+% bar(X2(end,:),'FaceColor',[0.847058832645416 0.160784319043159 0])
+end
+
+ylim([0 0.04])
+xlim([0 11])
+XTick=[1:1:10];
+% title('no shift')
+p=gca;
+set(p,'XTick',1:1:length(Morg_in_bin));
+set(p,'YTick',0:0.01:0.04);
+xlabel({'','','x'})
+ylabel({'y','',''})
+box on
+
+
+plot(Cond_mass_array(2,:)*1e9./1.1292,'--','linewidth',3,'Color',[1 0.600000023841858 0.7843137383461])
+plot(sum(Cond_mass_array,1)*1e9./1.1292,'linewidth',2,'LineStyle','none','MarkerSize',10,'Marker','x','Color',[0 0 0]);
+plot(Cond_mass_array(1,:)*1e9./1.1292,'--','linewidth',3,'Color',[0.749019622802734 0.749019622802734 0])
