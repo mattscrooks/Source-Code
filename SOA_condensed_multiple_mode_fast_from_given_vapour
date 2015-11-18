@@ -1,0 +1,1109 @@
+% -------------------------------------------------------------------------
+% The MIT License (MIT)
+% 
+% Copyright (c) [2015] [Matthew Crooks]
+% 
+% Permission is hereby granted, free of charge, to any person obtaining a copy
+% of this software and associated documentation files (the "Software"), to deal
+% in the Software without restriction, including without limitation the rights
+% to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+% copies of the Software, and to permit persons to whom the Software is
+% furnished to do so, subject to the following conditions:
+% 
+% The above copyright notice and this permission notice shall be included in all
+% copies or substantial portions of the Software.
+% 
+% THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+% IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+% FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+% AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+% LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+% OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+% SOFTWARE.
+% -------------------------------------------------------------------------
+
+% -------------------------------------------------------------------------
+% This code solves the equilibrium partitioning theory equations for
+% multiple modes and produces the following outputs:
+
+
+% dm_dry is the dry diameter of the aerosol after CC
+% sig_aer is the geometric standard deviation after CC. If flag=0 this will
+%   be the same as the inputted sig_aer
+% Cij is the condensed mass array. Cij(i,j) is the number of moles of the
+%   jth organic condensed on the ith mode
+% org_frac is the organic mass fraction of each mode
+% error is some optional output which maybe a measure of the error
+% -------------------------------------------------------------------------
+
+function [dm_dry,sig_aer,OUT,org_frac,errors,Cond_mass_array] = SOA_condensed_multiple_mode(varargin)
+% This function sets up all the parameters for the simulation, some from
+% varargin and some are specified within the lines below.
+
+
+% -------------------------------------------------------------------------
+% The following will run this code if copied into the cmmand line of
+% MATLAB:
+
+% num_runs=1;
+% num_modes=6;
+% 
+% n_aerosols=60e6+440e6*rand(1,num_modes);
+% sz=60e-9+440e-9*rand(1,num_modes);
+% % sz=[30,100]*1e-8;
+% % w_param=10;%0.1+9.9*rand(num_runs,1);
+% sig_aer=0.5*ones(1,num_modes);
+% org_frac=0.1+0.8*rand(1,num_modes);
+% w_param=exp(log(0.01)+(log(10)-log(0.01))*linspace(0,1));
+% 
+% 
+% sig_aer=[0.5,0.1];
+% 
+% Morg_in_bin=[0.005 0.01 0.02 0.03 0.06 0.08 0.16 0.3 0.42 0.8].*95000./287./293.15;
+% 
+% 
+% i=1
+% n_aerosols=60e6+440e6*rand(1,num_modes);
+% sz=100e-9+100e-9*rand(1,num_modes);
+% sig_aer=0.5*ones(1,num_modes);
+% org_frac=0.1+0.8*rand(1,num_modes);
+% w_param=exp(log(0.01)+(log(10)-log(0.01))*linspace(0,1));
+% 
+% org_frac=0*org_frac(1)*ones(1,num_modes);
+%  n_aerosols=100e6*ones(1,num_modes);
+% % n_aerosols=sort(n_aerosols);
+% % sz=sz(1)*ones(1,num_modes);
+%  sz=sort(sz);
+% 
+% [d_aer(i,:),Morg_in_bin(i,:),Cond_mass_array,scal(i)]=...
+% SOA_condensed_multiple_mode_fast_from_given_vapour(2,n_aerosols(i,:),[sz(i,:),sig_aer(i,:)],...
+% Morg_in_bin,1770*ones(1,num_modes),132/1000*ones(1,num_modes),org_frac(i,:));
+% -------------------------------------------------------------------------
+
+
+% -------------------------------------------------------------------------
+% varargin
+% 1: flag, redundant, use for flag shift if you want
+% 2: n_aer, number concentration of aerosol (non-volatile), vector 
+%       - component for each non-volatile mode
+% 3: [d_aer_final,sig_aer], final median size of aerosol particles after
+%       co-condensation of semi-volatiles and standard deviation, vector - component for each
+%       non-volatile mode
+% 4: c.Morg_in_bin, total mass organics in micrograms per m^3 (O(1))
+% 5: rhoa(1,...,i), densities - best to stipulate all of these, core first
+%    then SV in a row vector
+% 6: Ma(1,...,i), molecular weight - best to stipulate all of these, core 
+%    first then SV in a row vector
+% 7: nu, van't Hoff factor - best to stipulate all of these, core 
+%    first then SV in a row vector
+% 8: RHInit
+% -------------------------------------------------------------------------
+
+% -------------------------------------------------------------------------
+% Code dependencies:
+% svp.m
+% -------------------------------------------------------------------------
+
+global moles_core
+
+moles_core = [];
+
+% default flag values
+flag = 1; % Flag to turn change in sig_aer on. 
+        % flag=1: change sig_aer
+        % flag=0: don't change    
+        
+        
+flag_shift = 0;   % Flag to shift sig_aer
+                % 0: it doesnt't
+                % this can be replaced by flag in inputs as flag isn't used
+                % anymore
+
+% use inputted flag value if specified
+if(nargin >= 1)
+    flag_shift = varargin{1};
+end
+
+
+
+% specify temperature and pressure
+PInit = 95000;
+TInit = 293.15;
+
+Ra = 287;
+
+
+
+% default RH
+RHInit = 0.5;
+% Update RH to inputted value
+if(nargin >= 8)
+    RHInit = varargin{8};
+end
+
+
+% default number concentration of aerosol per unit volume.
+n_aer = 10e6.*PInit./Ra./TInit; 
+% default number of modes of non-volatile aerosol
+num_modes = 1; 
+
+% update number concentration and number of modes to inputted values
+if(nargin >= 2)
+    n_aer = varargin{2}.*PInit./Ra./TInit;
+    num_modes = length(n_aer);
+end
+
+% default core diameter and geometric standard deviation
+d_aer = 10e-9*ones(1,num_modes);
+sig_aer = 0.5*ones(1,num_modes);
+
+% Update diameter and standard deviation if given as an input
+if(nargin >= 3)
+    d_aer = varargin{3};
+    
+    if length(d_aer) ~= 2*num_modes % error message if there is
+        % an odd number of entries in d_aer_final, ie there is not a diameter and
+        % sigma for each mode of post co-condensation aerosol particle
+        error('d_aer and sig_aer are not inputted as pairs')
+    end
+    
+    %extract d_aer and sig_aer from inputted d_aer
+    sig_aer = d_aer(num_modes+1:end);
+    d_aer(num_modes+1:end) = [];
+end
+
+
+% Default values of organic concentration and number of volatility bins
+Morg_in_bin = [0.005 0.01 0.02 0.03 0.06 0.08 0.16 0.3 0.42 0.8]*1e-9;
+num_org = 10;
+
+% Update if defined in input
+if(nargin >= 4)
+    Morg_in_bin = varargin{4}*1e-9;
+    num_org = length(Morg_in_bin);
+end
+
+% length of Ma, rho and nu. This is the total number of core aerosols and
+% volatility bins. ie the number of compounds composing the dry aerosol
+% particles
+num_comp = num_modes+num_org;
+
+
+% ammonium sulphate molecular weight and density for the core aerosol
+% defaults for no inputted multiple mode values
+Ma = 132./1000*ones(1,num_modes);
+rhoa = 1770*ones(1,num_modes);    
+
+% error message if there are an incompatible number of inputs, ie you need
+% to provide both a denisty and molecular weight
+if(nargin == 5)
+    error('Cannot have 5 inputs')
+end
+
+% changes values if data provided
+if(nargin >= 6)
+    rhoa = varargin{5};
+    Ma = varargin{6};
+end
+
+% default organic molecular weight and density if only the core is
+% specified
+if length(Ma) < num_comp;
+    Ma(num_modes+1:num_comp) = 200e-3; %Ditto num_comp
+    rhoa(num_modes+1:num_comp) = 1500; %Ditto Ma
+end
+
+
+
+% Default van't Hoff factors
+nu = [3*ones(1,num_modes), ones(1,num_comp-num_modes)]; 
+
+% Update if specified
+if(nargin >= 7)
+    nu = varargin{7};
+end
+
+% Molecular weight and density of water
+Mw = 18./1000;
+rhow = 1000.;
+
+% Compose required parameter values into a single variable c to be passed 
+% into myfun
+c.flag = flag;
+c.c(5) = PInit;
+c.c(6) = TInit;
+c.c(7) = RHInit;
+% NB:there are no c.c(1)-c.c(4) as thispart of the code has been edited
+% from another that did. They are now redundant.
+c.sig_aer = sig_aer;
+c.d_aer = d_aer;
+c.Morg_in_bin = Morg_in_bin;
+c.num_modes = num_modes;      
+c.n_aer = n_aer;                             
+c.Ma = Ma;                            
+c.rhoa = rhoa;                        
+c.num_org = num_org;
+c.nu = nu;
+c.flag_shift = flag_shift;
+
+
+% Solve the equilibrium partitioning theory for the above parameters
+        [OUT,Xvars] = myfun(c);
+        
+%       Extract the 3 solutions
+        Cij_bar = OUT.Cij_bar;
+        Cij_hat = OUT.Cij_hat;
+        Cij_pert = OUT.Cij_pert;
+        Cij = OUT.num;
+        moles_water=Xvars.moles_water;
+
+        
+        
+        % Calculate various quantities which may be relevant
+        for i=1:num_modes
+            mass_dry_aerosol(i,1) = moles_core(i)./nu(i).*Ma(i)+sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end));
+            mass_dry_aerosol_lead(i,1)=moles_core(i)./nu(i).*Ma(i)+sum(Cij_bar(i,:)*1e-9.*Ma(num_modes+1:end)./nu(num_modes+1:end));
+            mass_dry_aerosol_first(i,1)=moles_core(i)./nu(i).*Ma(i)+sum(Cij_pert(i,:)*1e-9.*Ma(num_modes+1:end)./nu(num_modes+1:end));
+            
+            Vol_dry_aerosol(i,1)=moles_core(i)./nu(i).*Ma(i)./rhoa(i)...
+                +sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end));
+            
+            Vol_wet_aerosol(i,1)=moles_core(i)./nu(i).*Ma(i)./rhoa(i)...
+                +sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end))+1e-9*moles_water(i).*Mw./rhow;
+            
+            org_frac(i,1)=sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end))./mass_dry_aerosol(i);
+            org_frac_lead(i,1)=sum(Cij_bar(i,:)*1e-9.*Ma(num_modes+1:end)./nu(num_modes+1:end))./mass_dry_aerosol_lead(i);
+            org_frac_first(i,1)=sum(Cij_pert(i,:)*1e-9.*Ma(num_modes+1:end)./nu(num_modes+1:end))./mass_dry_aerosol_first(i);
+            
+            Cond_mass_array(i,:)=Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end);
+        end
+        
+        % We use errors to output various quantities. This can be edited
+        % here without changing the rest of the code, ie without adding
+        % addition outputs to the main function
+        errors=Xvars;
+        
+        % Retrospectively change the standard deviation if that's what we
+        % want to do.
+        if flag_shift==0
+            % Diameter of wet aerosol assuming sig_aer does not change
+            dm_dry=(Vol_dry_aerosol*6/pi./n_aer'.*exp(-4.5*sig_aer'.^2)).^(1/3);
+            dm_wet=(Vol_wet_aerosol*6/pi./n_aer'.*exp(-4.5*sig_aer'.^2)).^(1/3);
+            
+            errors.dm_wet=dm_wet;
+            errors.sig_aer_wet=sig_aer;
+            
+        else
+            % change sig_aer
+            % The (arithmetic?) standard deviation at the start.
+            sd=exp(log(d_aer)+0.5.*sig_aer.^2).*sqrt(exp(sig_aer.^2)-1);
+            
+            % Calculate shift in sig_aer
+            
+            for i=1:num_modes
+                
+                sig_aer(i)=fzero(@(x)shift_sig(x,Vol_dry_aerosol(i),sd(i),n_aer(i)),sig_aer(i));
+                sig_aer_wet(i)=fzero(@(x)shift_sig(x,Vol_wet_aerosol(i),sd(i),n_aer(i)),sig_aer(i));
+            end
+            
+            dm_dry=(Vol_dry_aerosol*6/pi./n_aer'.*exp(-4.5*sig_aer'.^2)).^(1/3);
+            dm_wet=(Vol_wet_aerosol*6/pi./n_aer'.*exp(-4.5*sig_aer_wet'.^2)).^(1/3);
+            
+            errors.sig_aer_wet=sig_aer_wet;
+            errors.dm_wet=dm_wet;
+            
+        end
+        
+        
+        % Specify various outputs:
+        
+        % organic mass fraction on each mode
+        errors.mol_frac=sum(Cij')./(moles_core+sum(Cij'));
+        % total condensed concentration or organics on each mode
+        errors.mols_org=sum(Cij');
+        % moles in the core aerosol
+        errors.moles_core=moles_core;
+        % average mole fraction
+        errors.beta=Xvars.beta;
+        
+        % percentage errors in the condensed concentrations of the two 
+        % approximations relative to the numerical solution
+        leading_error=(Cij-Cij_bar*1e-9)./Cij*100;
+        first_error=(Cij-Cij_pert*1e-9)./Cij*100;
+        errors.lead_perc=leading_error;
+        errors.first_perc=first_error;
+        
+        % percentage errors in the total condensed concentrations of each 
+        % organic from the two approximations relative to the numerical 
+        %solution
+        leading_org_perc_diff=(sum(Cij)-sum(Cij_bar*1e-9))./sum(Cij)*100;
+        first_org_perc_diff=(sum(Cij)-sum(Cij_pert*1e-9))./sum(Cij)*100;
+        errors.leading_org_perc_diff=leading_org_perc_diff;
+        errors.first_org_perc_diff=first_org_perc_diff;
+        
+        % percentage error in organic mass fraction relative to the 
+        % numerical solution
+        errors.of_lead_perc=(org_frac-org_frac_lead)./org_frac.*100;
+        errors.of_first_perc=(org_frac-org_frac_first)./org_frac.*100;
+        
+        errors.of=org_frac;
+        errors.of_lead=org_frac_lead;
+        errors.of_first=org_frac_first;
+        
+        
+        errors.Vol_wet_aerosol=Vol_wet_aerosol;
+        
+
+
+
+
+
+
+end
+
+
+function [F,Xvars]=myfun(c)
+% This function sets up the call of the solvers taking the parameter values
+% from c specified in the function SOA_condensed_multiple_mode
+
+global moles_core
+global condensed_water_moles
+global C_i_star_mole
+global Cij_guess
+% global Cij_guess_temp
+global water
+
+% extract parameter values from c
+flag = c.c(1);
+num_comp = c.num_modes+length(c.Morg_in_bin);
+Ma = c.Ma;
+rhoa = c.rhoa;
+d_aer = c.d_aer;
+n_aer = c.n_aer;
+PInit = c.c(5);
+TInit = c.c(6);
+Ra = 287;
+sigma = 72e-3;
+R_gas = 8.314;
+Mw = 18./1000;
+rhow = 1000.;
+RHInit = c.c(7);
+flag = c.flag;
+Morg_in_bin = c.Morg_in_bin; % micro grams per m3
+nu = c.nu;
+
+% Specify saturation concentration of the volatility bins
+log_10_cstar = linspace(-6,3,c.num_org);
+cstar = 10.^log_10_cstar;
+
+delta_h_vap = 150.*ones(1,num_comp-c.num_modes);           
+
+
+
+% Mass of core aerosol for a lognormal size distribution 
+core = pi./6.*rhoa(1:c.num_modes).*exp(3.*log(d_aer)+4.5.*c.sig_aer.^2).*n_aer;
+% calculate the number of moles in the core
+moles_core = core./Ma(1:c.num_modes).*nu(1:c.num_modes); % moles / m^3
+
+% calculate  the partial pressure in atmospheres, cstar has units of
+% micrograms per cubic metre?
+P_i_o_atm_298 = cstar.*298.15.*8.2057d-5./(Ma(c.num_modes+1:end).*1e6.*1000);
+
+% calculate vapour pressure at specified temperature using clausius
+% clapeyron
+P_i_o_atm = P_i_o_atm_298.*exp(delta_h_vap.*1000./R_gas.*(1./298.15-1./TInit));
+P_mmHg = 760.*P_i_o_atm;
+C_i_star_mole = 1e6.*P_mmHg./(760.*0.000082057.*TInit); % micro-moles per cubic metre
+C_i_star_mole = C_i_star_mole./1e6;
+
+
+% saturation vapour pressure of water
+sat_vap_water = svp(TInit,'buck2','liq');
+
+
+% molar based Ci*
+C_i_star_water = 1e6.*sat_vap_water./(R_gas.*TInit); % micro-moles per cubic metre
+C_i_star_water = C_i_star_water./1e6;
+
+
+
+
+
+% Construct d to input into func
+d.Morg_in_bin_moles = Morg_in_bin./Ma(c.num_modes+1:end).*nu(c.num_modes+1:end);
+d.C_i_star_mole = C_i_star_mole;
+d.moles_core = moles_core;
+d.num_org = c.num_org;
+d.num_modes = c.num_modes;
+d.n_aer = n_aer;
+d.d(5) = PInit;
+d.d(6) = TInit;
+d.d(7) = RHInit;
+d.Ma = Ma;
+d.rhoa = rhoa;
+d.sig_aer = c.sig_aer;
+d.nu = nu;
+d.flag = flag;
+d.d_aer = d_aer;
+d.flag_shift = c.flag_shift;
+
+
+
+% Specify the options for fsolve depending on the version of Matlab being
+% used. Older versions use optimset and newer versions use optimoptions.
+% The following options work on the two computers frequently used by the
+% authors. We turn on 'Jacobian' on and provide the Jacobian analytically.
+% This makes fsolve converge quadratically rather than linearly using the
+% secant method with a finite difference Jacobian. This also helps avoid
+% infs and NaNs when calculating the finite differences.
+if sum(version) == 942
+   options = optimset('fsolve');
+   options.Jacobian = 'on';
+else
+   options = optimoptions(@fsolve,'Jacobian','on');
+end
+ 
+% specify tolerance of solver
+options.TolX = 1e-25;
+
+condensed_water_moles = zeros(c.num_modes,1);
+Cij_guess = zeros(c.num_modes,c.num_org);
+water = [zeros(c.num_modes,1),1e9*ones(c.num_modes,1)];
+
+
+
+
+
+
+% Calculate the average mole_fraction, beta. Cij_guess is also output from 
+% Cij_bar_func as a global variable
+% NB: This function works in usits of 1e9 kg/m^3. This gives matlab O(1)
+% terms to work with with seems to be more efficient and avoids rounding
+% errors.
+beta = fzero(@(x)Cij_bar_func(x,d),[0 1e6]);
+
+% Save Cij_guess as Cij_bar, this is the quasi-leading order solution
+Cij_bar = Cij_guess;
+
+% Calculate Cij_hat, the value of the small perturbation
+% NB: This function works in usits of 1e9 kg/m^3. This gives matlab O(1)
+% terms to work with with seems to be more efficient and avoids rounding
+% errors.
+[Cij_hat,moles_water] = Cij_hat_func(Cij_bar,d);
+
+% The perturbation solution is the sum of the quasi-leading order and
+% perturbation
+Cij_pert = Cij_bar+Cij_hat;
+
+
+
+% Dij is the numerical solution. Default this to the perturbation solution
+% as it needs to have a value. 
+Dij = Cij_pert*1e-9;
+
+% Solve the full system using the approximations as the solution. Cij_pert
+% and Cij_bar can be used interchangeably
+% NB: This function works in usits of 1e9 kg/m^3. This gives matlab O(1)
+% terms to work with with seems to be more efficient and avoids rounding
+% errors.
+% Dij = fsolve(@(x)func(x,d),Cij_pert,options)/1e9;
+
+% In some situations the perturbation solution as an initial guess can lead
+% to negative Dij. These 3 lines recalculate the numericla solution using
+% the quasi-leading order solution
+% if min(min(Dij))<0
+%     Dij=fsolve(@(x)func(x,d),Cij_bar,options)/1e9;
+% end
+
+% In some cases no numerical solution can be found with sufficient accuracy
+% using either of the approximations. This is the problem with direct
+% numerical solution and why the approximations are arguably a more robust
+% method of solution. func outputs both the residuals F and the Jacobian.
+% If the sum of the absolute values of the residuals is too large then
+% default the numerical solution back to the perturbation solution.
+% [F,J] = func(Dij*1e9,d);
+% if max(abs(F))>1e-6
+%     Dij = Cij_pert*1e-9;
+% end
+
+% This keeps track of whether a numericla solution can be found. If void=0
+% then a solution is calculated
+void = 0;
+% If no solution is found then change void to 1.
+% if max(abs(F)) > 1e-5
+%     void = 1;
+% end
+
+
+
+
+% -------------------------------------------------------------------------
+% This section of code plots Figure 3. Uncomment as necessary.
+
+% for i=1:c.num_modes
+%     % Calculate the inividual number of moles on each mode including the
+%     % core
+%     moles_dry_aerosol(i,1)=moles_core(i)+sum(Dij(i,:))+1e-9*water(i);
+%     % calculate the individual numebr of moles of organic on each mode
+%     % excluding the core
+%     moles(i,1)=sum(Dij(i,:));
+% end
+% 
+% % This is the organic mole fraction of each individual mode
+% y=moles./moles_dry_aerosol;
+% % Calculate the average mole fraction
+% x=sum(y)./length(y);
+% hold on
+% % Plot stuff
+% plot(x+0*y,y,'-','Linewidth',2,'Color',[0.847058832645416 0.160784319043159 0])
+% plot(x+0*y,y,'k.','Markersize',20,'MarkerFaceColor',...
+%     [0.0392156876623631 0.141176477074623 0.415686279535294],...
+%     'LineStyle','none',...
+%     'Color',[0.0392156876623631 0.141176477074623 0.415686279535294])
+% xlabel({'','','x'})
+% ylabel({'y','',''})
+% p=gca;
+% 
+% 
+% set(p,'XTick',0:0.2:1);
+% set(p,'XTicklabel',{'0','0.2','0.4','0.6','0.8','1'});
+% set(p,'YTick',0:0.2:1);
+% set(p,'YTicklabel',{'a','b','c','d','e','f'});
+
+% -------------------------------------------------------------------------
+
+
+% Collate relevant outputs into Eij/F and Xvars    
+Eij.num=Dij;
+Eij.Cij_bar=Cij_bar;
+Eij.Cij_hat=Cij_hat;
+Eij.Cij_pert=Cij_pert;
+Xvars=d;
+Xvars.void=void;
+Xvars.Morg_in_bin_moles=d.Morg_in_bin_moles;
+Xvars.C_i_star_mole=d.C_i_star_mole;
+Xvars.beta=beta;
+Xvars.moles_water=moles_water;
+
+F=Eij;
+
+
+end
+
+
+
+
+function f = Cij_bar_func(beta,d)
+% Calculates the condensed mass or organics Cij_guess with an average mole
+% fraction of beta. The output f is the difference between the average mole
+% fraction of Cij_guess and beta. 
+
+% Calculates Cij^c without the need for a matrix inversion
+
+% NB:This function works in usits of 1e9 kg/m^3. This gives matlab O(1)
+% terms to work with with seems to be more efficient and avoids rounding
+% errors.
+
+global Cij_guess
+global water
+
+% material parameters
+Ra = 287;
+sigma = 72e-3;
+R_gas = 8.314;
+Mw = 18./1000;
+rhow = 1000.;
+
+% Extract variables from d
+n_aer = d.n_aer;
+PInit = d.d(5);
+TInit = d.d(6);
+RHInit = d.d(7);
+Morg_in_bin = d.Morg_in_bin_moles*1e9;
+C_i_star_mole = d.C_i_star_mole*1e9;
+moles_core = d.moles_core*1e9;
+num_org = d.num_org;
+num_modes = d.num_modes;
+Ma = d.Ma;
+rhoa = d.rhoa;
+sig_aer = d.sig_aer;
+nu = d.nu;
+
+%------------------
+% Calculate water onto aerosol with Cij_guess 
+for i = 1:num_modes
+    leading_water_content(i) = 1e9*fzero(@(x)water_eqm(x,abs(Cij_guess(i,:))*1e-9,d,i),[0,1]);
+end
+
+% leading_water_content;
+% Now add this water and calculate Kf:
+
+% Mass of wet aerosol with condensed organics and water (in kg per m^3).
+% Mass of water used is that just calculated
+for i = 1:num_modes
+    mass_wet_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)+sum(Cij_guess(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end))...
+        +leading_water_content(i).*Mw;
+    mass_dry_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)+sum(Cij_guess(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end));
+end
+
+% Volume of wet aerosol
+for i = 1:num_modes
+    Vol_wet_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)./rhoa(i)...
+        +sum(Cij_guess(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end))...
+        +leading_water_content(i).*Mw./rhow;
+    Vol_dry_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)./rhoa(i)...
+        +sum(Cij_guess(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end));
+end
+
+% Diameter of wet aerosol assuming sig_aer does not change
+dm_wet = (Vol_wet_aerosol*1e-9*6/pi./n_aer'.*exp(-4.5*sig_aer'.^2)).^(1/3);
+
+% Kelvin factor for water
+Kelvin_factor_water = exp(4.*Mw./rhow.*sigma./(R_gas.*TInit.*dm_wet));
+
+%------------------
+
+
+
+
+
+
+
+% Total number of moles on the aerosols excluding water
+COA = moles_core+moles_core.*beta;
+
+% water based on mole fraction and RH
+moles_water = RHInit.*(sum(Cij_guess,2)+moles_core')./(Kelvin_factor_water-RHInit);
+
+% Add moles of water to COA
+COA = COA+moles_water';
+
+water = moles_water;
+
+
+% Kronecka delta function
+delta=eye(max(num_modes,num_org));
+A=zeros(num_org*num_modes);
+b=zeros(num_org*num_modes,1);
+
+% Calculate partitioning coefficient
+for j=1:num_org
+    for i=1:num_modes
+        part_func(i,j)=1./(1+C_i_star_mole(j)./COA(i));
+    end
+end
+
+% gamma_i is such that 
+% Cjc = (Cj-Cjc)*gamma_i                            ---(code1)
+% in line 517 of Crooks et. al
+% 2015 in Appendix A. 
+gamma_i=sum(part_func./(1-part_func),1);
+
+% If you write the first equation of Appendix A as
+% Cijc = xi_ij *(Cj - Cjc +Cijc)                    ---(code2)
+% and follow through the algebra you get the result (code1). (code1) can be
+% rearranged to find Cjc as
+% Cjc = Cj *gamma_i./(1+gamma_i)
+% In this code Morg_in_bin = Cj
+Cjc = Morg_in_bin.*gamma_i./(1+gamma_i);
+ 
+% (code2) can be rearranged to find Cijc. This is evaluated here as Cij:
+Cij = zeros(num_modes,num_org);
+for j = 1:num_org
+    for i = 1:num_modes
+        Cij(i,j) = (Morg_in_bin(j)-Cjc(j)).*part_func(i,j)./(1-part_func(i,j));
+    end
+end
+
+
+% Calculate the difference between the average mole fraction of the
+% solution Cij and beta. We iterate this function in myfun to find beta
+% such that f = 0;
+f=sum(Cij(1,:))./moles_core(1)-beta;
+
+% Store this value of Cij as Cij_guess to be accessed through the global
+% variable.
+Cij_guess=Cij;
+
+end
+
+function [Cij_hat,leading_water_content] = Cij_hat_func(Cij_bar,d)
+% Calculates the perturbation term which when added to the quasi-leading
+% order solution gives the perturbation solution
+
+% NB:This function works in usits of 1e9 kg/m^3. This gives matlab O(1)
+% terms to work with with seems to be more efficient and avoids rounding
+% errors.
+
+global water
+
+% material parameters
+Ra=287;
+sigma=72e-3;
+R_gas=8.314;
+Mw=18./1000;
+rhow=1000.;
+
+% Extract variables from d
+n_aer=d.n_aer;
+PInit=d.d(5);
+TInit=d.d(6);
+RHInit=d.d(7);
+Morg_in_bin=d.Morg_in_bin_moles*1e9;
+C_i_star_mole=d.C_i_star_mole*1e9;
+moles_core=d.moles_core*1e9;
+num_org=d.num_org;
+num_modes=d.num_modes;
+Ma=d.Ma;
+rhoa=d.rhoa;
+sig_aer=d.sig_aer;
+nu=d.nu;
+
+if max(max(Cij_bar))<1e-6
+    Cij_bar=Cij_bar*1e9;
+end
+
+% Calculates water content of aerosol based on an organic content Cij_bar
+for i=1:num_modes
+    leading_water_content(i)=1e9*fzero(@(x)water_eqm(x,Cij_bar(i,:)*1e-9,d,i),[0 1]);
+end
+
+water=leading_water_content;
+
+% Now add this water and calculate Kf:
+
+% Mass of wet aerosol with condensed organics and water (in kg per m^3).
+% Mass of water used is that just calculated
+for i=1:num_modes
+    mass_wet_aerosol(i,1)=moles_core(i).*Ma(i)./nu(i)+sum(Cij_bar(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end))...
+        +leading_water_content(i).*Mw;
+    mass_dry_aerosol(i,1)=moles_core(i).*Ma(i)./nu(i)+sum(Cij_bar(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end));
+end
+
+% Volume of wet aerosol
+for i=1:num_modes
+    Vol_wet_aerosol(i,1)=moles_core(i).*Ma(i)./nu(i)./rhoa(i)...
+        +sum(Cij_bar(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end))...
+        +leading_water_content(i).*Mw./rhow;
+    Vol_dry_aerosol(i,1)=moles_core(i).*Ma(i)./nu(i)./rhoa(i)...
+        +sum(Cij_bar(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end));
+end
+
+% Diameter of wet aerosol assuming sig_aer does not change
+dm_wet=(Vol_wet_aerosol*1e-9*6/pi./n_aer'.*exp(-4.5*sig_aer'.^2)).^(1/3);
+
+% Kelvin factors for organics
+for i=1:num_modes
+    Kelvin_factors(i,:)=exp(4.*(Ma(num_modes+1:end)./rhoa(num_modes+1:end)...
+        *sigma./(R_gas.*TInit.*dm_wet(i))));
+end
+
+
+
+
+
+
+
+
+
+
+
+% Kronecka delta function
+delta=eye(max(num_modes+1,num_org+1));
+A=zeros(num_org*num_modes);
+b=zeros(num_org*num_modes,1);
+
+% Leading order COA, we call this X_bar here
+for i=1:num_modes
+    X_bar(i)=moles_core(i)+sum(Cij_bar(i,:))+leading_water_content(i);
+end
+Kelvin_factor_water=exp(4.*Mw./rhow.*sigma./(R_gas.*TInit.*dm_wet));
+eta=1+RHInit./(Kelvin_factor_water-RHInit);
+Kelvin_factors;
+
+
+% Construct the function F. We add an abs here to help try to prevent
+% negative Dij values. ie we solve x-|f(x)|=0.
+for j=1:num_org % i and j refer to the equation
+    for i=1:num_modes
+        for l=1:num_org % k and l refer to the terms in the i,j^th equation
+            for k=1:num_modes
+
+                % Dependence on ^Cij
+                A((j-1)*num_modes+i,(l-1)*num_modes+k)=...
+                    delta(i,k).*delta(j,l)+(Morg_in_bin(j)-sum(Cij_bar(:,j))+Cij_bar(i,j))...
+                    .*X_bar(i)./(X_bar(i)+C_i_star_mole(j).*Kelvin_factors(i,j)).^2.*delta(i,k).*eta(i)...
+                    -(Morg_in_bin(j)-sum(Cij_bar(:,j))+Cij_bar(i,j))...
+                    ./(X_bar(i)+C_i_star_mole(j).*Kelvin_factors(i,j)).*delta(i,k).*eta(i)...
+                    +X_bar(i)./(X_bar(i)+C_i_star_mole(j).*Kelvin_factors(i,j)).*delta(j,l).*(1-delta(i,k));
+
+                
+            end
+        end
+        
+        % inhomogeneous terms
+        b((j-1)*num_modes+i,1)=-Cij_bar(i,j)+...
+            (Morg_in_bin(j)-sum(Cij_bar(:,j))+Cij_bar(i,j)).*X_bar(i)...
+            ./(X_bar(i)+C_i_star_mole(j).*Kelvin_factors(i,j));
+        
+        
+    end
+end
+
+% Calculate the pertutbation terms
+Cij_hat=reshape(A\b,num_modes,num_org);
+
+
+
+end
+
+function [F,J] = func(Cij,d)
+% Calculates the residuals of an equation of the form F(x) = x-f(x) = 0;
+% x here is the condensed masses of the organics on each of the modes
+% f(x) is the partition function multiplied by the total abundance of the
+% organic
+
+% NB:This function works in usits of 1e9 kg/m^3. This gives matlab O(1)
+% terms to work with with seems to be more efficient and avoids rounding
+% errors.
+
+global condensed_water_moles
+
+ 
+
+% material parameters
+Ra = 287;
+sigma = 72e-3;
+R_gas = 8.314;
+Mw = 18./1000;
+rhow = 1000.;
+
+% Extract variables from d
+n_aer = d.n_aer;
+PInit = d.d(5);
+TInit = d.d(6);
+RHInit = d.d(7);
+Morg_in_bin = d.Morg_in_bin_moles*1e9;
+C_i_star_mole = d.C_i_star_mole*1e9;
+moles_core = d.moles_core*1e9;
+num_org = d.num_org;
+num_modes = d.num_modes;
+Ma = d.Ma;
+rhoa = d.rhoa;
+sig_aer = d.sig_aer;
+flag = d.flag_shift;
+d_aer = d.d_aer;
+nu = d.nu;
+
+% Ensure initial guesses are positive
+Cij = abs(Cij);
+
+
+    
+% Calculate moles of condensed water assuming Cij moles of condensed organics
+for i = 1:num_modes
+    water(i) = 1e9*fzero(@(x)water_eqm(x,Cij(i,:)*1e-9,d,i),[0 1]);
+end
+    
+condensed_water_moles = water';
+COA = moles_core'+sum(Cij,2)+condensed_water_moles;
+
+% -------------
+% Now add this water and recalculate:
+
+% Mass of wet aerosol with condensed organics and water (in kg per m^3).
+% Mass of water used is that just calculated
+for i = 1:num_modes
+    mass_wet_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)+sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end))...
+        +condensed_water_moles(i).*Mw;
+    mass_dry_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)+sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end));
+end
+
+% Volume of wet aerosol
+for i = 1:num_modes
+    Vol_wet_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)./rhoa(i)...
+        +sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end))...
+        +condensed_water_moles(i).*Mw./rhow;
+    Vol_dry_aerosol(i,1) = moles_core(i).*Ma(i)./nu(i)./rhoa(i)...
+        +sum(Cij(i,:).*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end));
+end
+
+rho_wet_aerosol = mass_wet_aerosol./Vol_wet_aerosol;
+% Diameter of wet aerosol assuming sig_aer does not change
+dm_wet = (Vol_wet_aerosol*1e-9*6/pi./n_aer'.*exp(-4.5*sig_aer'.^2)).^(1/3);
+
+% Kelvin factors for organics
+for i = 1:num_modes
+    Kelvin_factors(i,:) = exp(4.*(Ma(num_modes+1:end)./rhoa(num_modes+1:end)...
+        *sigma./(R_gas.*TInit.*dm_wet(i))));
+end
+
+
+
+F=zeros(num_org*num_modes,1);
+
+% Construct the function F. We add an abs here to help try to prevent
+% negative Dij values. ie we solve x-|f(x)|=0.
+for j=1:num_org
+    for i=1:num_modes
+       
+        F((j-1)*num_modes+i)=Cij(i,j)-abs((Morg_in_bin(j)-(sum(Cij(:,j))-Cij(i,j)))...
+            ./(1+C_i_star_mole(j).*Kelvin_factors(i,j)./COA(i)));
+        
+    end
+end
+
+
+
+
+
+% Calculate the Jacobian
+d.Kelvin_factors=Kelvin_factors;
+J=Jac(Cij,d);
+
+
+end
+
+function J=Jac(Cij,d)
+% This function calculates the Jacobian analytically.
+
+% NB:This function works in usits of 1e9 kg/m^3. This gives matlab O(1)
+% terms to work with with seems to be more efficient and avoids rounding
+% errors.
+
+
+global condensed_water_moles
+
+
+% material parameters
+Ra = 287;
+sigma = 72e-3;
+R_gas = 8.314;
+Mw = 18./1000;
+rhow = 1000.;
+
+% Extract variables from d
+n_aer = d.n_aer;
+PInit = d.d(5);
+TInit = d.d(6);
+RHInit = d.d(7);
+Morg_in_bin = d.Morg_in_bin_moles*1e9;
+C_i_star_mole = d.C_i_star_mole*1e9;
+moles_core = d.moles_core*1e9;
+num_org = d.num_org;
+num_modes = d.num_modes;
+Ma = d.Ma;
+rhoa = d.rhoa;
+sig_aer = d.sig_aer;
+
+Kelvin_factors = d.Kelvin_factors;
+
+% Total number of moles on the aerosols
+COA = moles_core'+sum(Cij,2)+condensed_water_moles;
+
+sz = num_modes.*num_org;
+J = zeros(sz);
+delta = eye(max(num_modes,num_org));
+
+% Construct Jacobian matrix
+for j=1:num_org
+    for i=1:num_modes
+        for l=1:num_org
+            for k=1:num_modes
+
+                J((j-1)*num_modes+i,(l-1)*num_modes+k)=delta(i,k)*delta(j,l)...
+                    -COA(i)./(COA(i)+C_i_star_mole(j).*Kelvin_factors(i,j))...
+                     .*(-delta(j,l)+delta(i,k).*delta(j,l))+...
+                    -((Morg_in_bin(j)-(sum(Cij(:,j))-Cij(i,j)))...
+                     ./(COA(i)+C_i_star_mole(j).*Kelvin_factors(i,j))).*delta(i,k)...
+                    +((Morg_in_bin(j)-(sum(Cij(:,j))-Cij(i,j)))...
+                     ./(COA(i)+C_i_star_mole(j).*Kelvin_factors(i,j)).^2).*COA(i).*delta(i,k);
+
+            end
+        end
+        
+    end
+end
+
+
+
+end
+
+function F=water_eqm(x,Cij,d,i)
+% This function is used to iterate to find the number of moles of water on
+% an aerosol particle with a given core and condensed mass of organics.
+% This is very costly and is only used to check the approximate-iterative
+% scheme implemented in func.
+
+% Material parameters
+Ra = 287;
+sigma = 72e-3;
+R_gas = 8.314;
+Mw = 18./1000;
+rhow = 1000.;
+
+% Extract variables from d
+d_aer = d.d_aer;
+n_aer = d.n_aer;
+PInit = d.d(5);
+TInit = d.d(6);
+RHInit = d.d(7);
+moles_core = d.moles_core;
+num_org = d.num_org;
+num_modes = d.num_modes;
+Ma = d.Ma;
+rhoa = d.rhoa;
+sig_aer = d.sig_aer;
+nu = d.nu;
+
+% Aerosol mass (in moles per m^3)
+COA = moles_core'+sum(Cij,2);
+
+% Input value for moles of water
+condensed_water_moles = x;
+
+% Mass of wet aerosol with condensed organics and water (in kg per m^3).
+% Mass of water used is from previous iteration
+mass_wet_aerosol = moles_core'.*Ma(1:num_modes)'./nu(1:num_modes)'...
+    +sum(Cij.*Ma(num_modes+1:end)./nu(num_modes+1:end))...
+    +condensed_water_moles.*Mw;
+
+% Volume of wet aerosol
+Vol_wet_aerosol = moles_core'.*Ma(1:num_modes)'./nu(1:num_modes)'./rhoa(1:num_modes)'...
+    +sum(Cij.*Ma(num_modes+1:end)./nu(num_modes+1:end)./rhoa(num_modes+1:end))...
+    +condensed_water_moles.*Mw./rhow;
+
+% Diameter of wet aerosol assuming sig_aer does not change
+dm_wet = (Vol_wet_aerosol*6/pi./n_aer'.*exp(-4.5*sig_aer'.^2)).^(1/3);
+
+% Kelvin factor for water
+Kelvin_factor_water = exp(4.*Mw./rhow.*sigma./(R_gas.*TInit.*dm_wet));
+
+
+
+
+
+
+% Calculate new mass of water
+condensed_water_moles = RHInit.*COA./(Kelvin_factor_water-RHInit);
+
+
+% Want this to be zero...
+F = condensed_water_moles(i)-x;
+
+end
+
+function f=shift_sig(sig_aer0,Vol_wet_aerosol,sd,n_aer)
+% Shifts geometric standard deviation while keeping the arithmetic sd the
+% same
+
+% Calculate wet diameter from the given total volume
+dm_wet=(Vol_wet_aerosol*6/pi./n_aer.*exp(-4.5*sig_aer0.^2)).^(1/3);
+
+% iterate until the arithmetic standard deviation with sig_aer0 and dm_wet
+% is the same as sd
+f=sd-exp(log(dm_wet)+0.5.*sig_aer0.^2).*sqrt(exp(sig_aer0.^2)-1);
+
+
+end
+
