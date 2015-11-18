@@ -1,3 +1,7 @@
+% -------------------------------------------------------------------------
+% Code from Topping et al. (2013). Consult those authors for copyright.
+% -------------------------------------------------------------------------
+
 function pi=SVP(T,flag,flag2)
 %usage: SVPIce(T,flag,flag2);
 % flag='marti'
