@@ -1,0 +1,1035 @@
+% -------------------------------------------------------------------------
+% Code from Topping et al. (2013). Consult those authors for copyright.
+% -------------------------------------------------------------------------
+
+function [TOUT,YOUT,vars] = co_condensation_3_multiple_mode(varargin)
+% Set up a simple parcel model, with an aerosol size distribution in which
+% the aerosols can also grow from trace vapours. 
+initial_time=cputime;
+
+display('Check that inputs 6 and 7 are in the correct format in relation to a factor of 1e-9./(PInit./Ra./TInit)') 
+display('check the n_aer is the correct format in relation to a factor of 1.*PInit./Ra./TInit')
+
+% Example of a call that works
+% [TOUT,YOUT,vars] = co_condensation_3(1,[10e6, 10e6],[60e-9 60e-9],1,0.95,...
+% [0.005 0.01 0.02 0.03 0.06 0.08 0.16 0.3 0.42 0.8]*1e-9, ...
+% 0.2*[0.005 0.01 0.02 0.03 0.06 0.08 0.16 0.3 0.42 0.8]*1e-9,[0.132,0.132],[1770 1770])
+
+% Varargin
+% 1: uz, windspeed, scalar
+% 2: n_aer, number concentration, vector - a component for each NV mode
+% 3: [d_aer_p(1,...,i),sig_aer(1,...,i)], median diameter and SD as a pair, 
+%       vector - a component for each NV mode,
+%       length(d_aer_p)==length(sig_aer)
+% 4: aer_gas, flag to allow aerosols to grow from gas. Set to 1 they do.
+% 5: Rinit, initial RH, scalar, decimal ie 1=100%
+% /6: Morg_in_bin, vector of length 10 for now - set to zero for no SV?
+% \7: Morg_cond_bin, vector of length 10 for each core mode
+% /8: Ma, molecular weight of core and organic components, vector
+%  9: rhoa, density of core and organic components, vector
+% \10:nu
+
+% */ indicates these two inputs should either but excluded or both appear
+%  \
+
+% global variables - quick and dirty
+global N_each
+global GRAV;
+global cp;
+global Lv;
+global Rv;
+global Ra;
+global R_gas;
+global Mw;
+global rhow;
+global dd;
+global ka;
+global uz;
+global rhoa;
+global Ma;
+global Maer;
+global mix_gas;
+global num_bins;
+global num_comp;
+global N;
+global RHInit;
+global PInit;
+global TInit;
+global sigma;
+global aer_gas;
+global aer_gas2;
+global log_10_cstar
+global delta_h_vap
+global nu1;
+global D;
+global d_aer_p;
+global org_frac;
+global X0;
+global mr_org_glob;
+global time1;
+global num_modes
+global num_org
+global here
+global t_checkpoint
+
+% These are probably redundant now
+here=0;
+time1=0;
+
+% Clear these, probably not necessary but the global variables can cause problems
+Ma=[];
+rhoa=[];
+
+% Number of core modes, defaults to one unless specified in the inputs
+num_modes=1;
+if(nargin>1)
+    num_modes=length(varargin{2});
+end
+
+% Turn on/off the SV. Default is set to off unless specified in the inputs
+aer_gas=0; % flag to allow aerosols to grow from gas. Set to 1 they do.
+aer_gas2=0; % flag to allow aerosols to grow from gas. Set to 1 they do.
+if(nargin>3)
+    aer_gas=varargin{4};
+    aer_gas2=varargin{4};
+end
+
+
+
+num_org=0;
+if(nargin>5)
+    % Number of components = Num core modes + Num organics
+    num_comp=length(varargin{6})+num_modes;
+    % Number of organic components
+    num_org=length(varargin{6});
+end
+
+% Adjusts num_comp and num_org if CC is switched off
+if aer_gas==0
+        num_comp=num_modes;
+	num_org=0;
+end
+
+% It's the number of aerosol modes plus 10 for the organics (default is 10
+% unless specified below). Volatity bin spacings
+log_10_cstar=[-6:1:3];
+
+% This possibly only needs to be of length num_org
+delta_h_vap=150.*ones(num_comp);
+% Van Hopt Factor, 3 for core, 1 for organics
+nu1=[3 ones(1,num_comp-num_modes)];
+
+
+
+GRAV=9.8;
+cp=1005;
+Lv=2.5e6;
+Rv=461.;    % specific gas constant for water vapour
+Ra=287;     % specific gas constant for dry air
+sigma=72e-3;% surface tension
+R_gas=8.314;% universal gas constant
+Mw=18./1000;% molecular weight of water
+rhow=1000.; % density of water
+
+% Avoid conflicts with global variables
+d_aer_p=[];
+
+
+% Parameters for core aerosol lognormal distributions
+n_aer=1000e6;  % total number - #/kg
+sig_aer=0.5;   % standard dev
+d_aer_p=60e-9; % median diameter
+
+% Wind speed, default 0.5m/s
+uz=0.5;   
+if(nargin>0)
+    uz=varargin{1};
+end
+
+% Update number concentration if specified
+if(nargin>1)
+    n_aer=varargin{2};
+end
+
+% Update median diameter and geometric standard deviation if specified
+if(nargin>2)
+    d_aer_p=varargin{3};
+    
+    
+    if length(d_aer_p)~=2*num_modes % error message if there is
+        % an odd number of entries in d_aer_p_final, ie there is not a diameter and
+        % sigma for each mode of post co-condensation aerosol particle
+        error('d_aer_p and sig_aer are not same length')
+    end
+    
+    %extract d_aer_p and sig_aer from inputted d_aer_p
+    sig_aer=d_aer_p(num_modes+1:end);
+    d_aer_p(num_modes+1:end)=[];
+end
+
+
+
+num_bins=80;    % number of mass bins
+d_small=0.1e-9; % bin size limits
+d_large=2e-6;   
+PInit=95000;    % Initial pressure
+TInit=293.15;   % Initial Temperature
+RHInit=0.95;     % Initial RH
+
+% Update initial RH if specified
+if(nargin>4)
+    RHInit=varargin{5};
+end
+
+% Molecular weight and density of core
+Ma(1:num_modes)=132./1000; 
+rhoa(1:num_modes)=1770;
+% ammonium sulphate for all modes unless inputted below, why would you want 
+% two modes of the same thing!?
+
+% Update molecular weight and density of core if specified in inputs
+if(nargin>7)
+    Ma=varargin{8};
+    rhoa=varargin{9};
+    nu1=varargin{10};
+end
+
+% Make sure we only have one value for all the core modes
+Ma=Ma(1);
+rhoa=rhoa(1);
+
+% Molecular weight of organics
+Ma=[Ma,200/1000*ones(1,num_comp-num_modes)];
+
+% Density of organics
+rhoa=[rhoa,1500*ones(1,num_comp-num_modes)];
+
+%lets setup the total  ammount of organic in each volatility bin
+Morg_in_bin=[0.005 0.01 0.02 0.03 0.06 0.08 0.16 0.3 0.42 0.8]; % micro grams per m3
+Morg_in_bin=Morg_in_bin.*1e-9./(PInit./Ra./TInit); % per kg?
+
+% Default values for gas and condensed phases for organics
+Morg_gas_bin=0.2*Morg_in_bin;
+Morg_cond_bin=0.8*Morg_in_bin;
+
+% Default organic mass fraction - this is probably redundant
+org_frac=0.9;
+if(nargin>5)
+   if(nargin<7)
+       error('Need to input at least 6 variables if you are inputting 5');
+   end
+   
+   % Total mass of organics specified    
+   Morg_in_bin=varargin{6}./(PInit./Ra./TInit);
+   % Mass of organics in condensed phase in each bin on each mode 
+   % ie Num_modes x number of volatility bins   
+   Morg_cond_bin=varargin{7}./(PInit./Ra./TInit);
+   % Mass in gas phase is total mass minus the sum of the condensed mass on each mode
+   Morg_gas_bin=Morg_in_bin-sum(Morg_cond_bin,1);
+   
+   % Converts to kg if organic mass is in micrograms
+      if max(Morg_in_bin)>0.01
+          display('rescaling Morg_in_bin, forgot factor of 1e-9')
+          Morg_in_bin=Morg_in_bin*1e-9;
+          Morg_gas_bin=Morg_gas_bin*1e-9;
+      end
+   
+   % Calculates organic fraction
+   org_frac=sum(Morg_cond_bin,2)'./...
+       (pi./6.*n_aer.*exp(3.*log(d_aer_p)+4.5.*sig_aer.^2).*rhoa(1)+sum(Morg_cond_bin,2)');
+end
+
+num_bins=num_bins+1;
+
+% Initial aerosol size distribution++++++++++++++++++++++++++++++++++++++++
+dN=sum(n_aer)./num_bins; % increment so each bin contains the same number
+N=zeros(num_bins,1);     % set size of vector
+D=zeros(num_bins,1);     % set size of vector
+D(1)=d_small;            % first bin size 
+% N(1,1)=sum(n_aer.*0.5.*erfc(-(log(D(1)./d_aer_p)./sqrt(2)./sig_aer))); % WHY IS THIS SO SMALL!!!!!!
+% cumulative lognormal - see http://en.wikipedia.org/wiki/Log-normal_distribution#Cumulative_distribution_function
+N(1,1)=dN;
+D(1)=fzero(@(X)0.5*sum(n_aer.*erfc(-log(X./d_aer_p)./(sig_aer.*sqrt(2)))-...
+        n_aer.*erfc(-log(d_small./d_aer_p)./(sig_aer.*sqrt(2))))-dN,[d_small,max(d_aer_p)]);
+    
+% Combine core modes into a single distribution
+for i=2:num_bins
+    % calculate the diameter of the bin so that there are dN particles in the bin collectively across the two modes
+    N(i,1)=dN;
+    
+    % put 1% fewer particles in the final bin just to make sure everything
+% works
+tweek=1;
+if i==num_bins
+    tweek=0.99;
+end
+    D(i)=fzero(@(X)0.5*sum(n_aer.*erfc(-log(X./d_aer_p)./(sig_aer.*sqrt(2)))-...
+        n_aer.*erfc(-log(D(i-1)./d_aer_p)./(sig_aer.*sqrt(2))))-dN*tweek,[D(i-1),1000*D(i-1)]);
+    
+    
+end
+
+% Calculate the number of particles in each mode in each bin
+N_each=zeros(num_bins,num_modes);
+% N_each(1,:)=N(1);
+N_each(1,:)=0.5*(n_aer.*erfc(-log(D(1)./d_aer_p)./(sig_aer.*sqrt(2)))-...
+        n_aer.*erfc(-log(d_small./d_aer_p)./(sig_aer.*sqrt(2))));
+    
+for i=2:num_bins
+        N_each(i,:)=0.5*(n_aer.*erfc(-log(D(i)./d_aer_p)./(sig_aer.*sqrt(2)))-...
+        n_aer.*erfc(-log(D(i-1)./d_aer_p)./(sig_aer.*sqrt(2))));
+end
+
+num_bins=num_bins-1;
+N(end,:)=[];
+N_each(end,:)=[];
+D(end,:)=[];
+
+%--------------------------------------------------------------------------
+
+
+
+% Assume that the first aerosol component is say ammonium sulphate and the
+% gas mixing ratio is set to that of the water mixing ratio - note this
+% will need to be changed.
+
+Maer=zeros(num_bins,1); % set size of matrix for mass of core in each bin
+
+Maer=pi./6.*D.^3.*rhoa(1); % mass of core in each bin - maybe this should be a lognormal distribution?
+
+
+mix_gas(1)=RHInit.*Ra./Rv.*SVP(TInit,'buck2','liq') ...
+    ./(PInit-SVP(TInit,'buck2','liq')); % Set the initial mixing ratios for ammonium sulphate gas here kg/kg
+
+
+% mass of each component, for other components, assume that the aerosol
+% content is practically nothing (1e-25 kg) and the gas mixing ratio is set
+% to that of the water mixing ratio - note this will need to be changed
+% too.
+
+
+
+if(aer_gas>=1)
+    
+    % The layout of Maer is as follows (read down the columns)
+    % Maeri =[mass     , mass      , mass     , ...  , mass   ]
+    %        [of core    of 1st      of 2nd            of last]
+    %        [aerosols   organic     organic           organic]
+    %        [across     on aer      on aer            on aer ]
+    %        [bins       across      across            across ]
+    %        [           bins        bins              bins   ]
+    
+    Maer=[Maer,zeros(num_bins,num_org)]; % Sets up matrix with first column 
+    % equal to the mass of the core previously called Maer and zeros for the organics  
+    
+    for i=1:num_org
+
+        Maer(:,1+i)=zeros(num_bins,1);
+
+
+        %    Maer(:,1+i)=Maer(:,1)*sum(org_frac./(1-org_frac))...
+        %    .*(Morg_in_bin(i)-Morg_gas_bin(i))./sum(Morg_in_bin-Morg_gas_bin);
+    end
+        
+        
+        % organic vapour mixing ratio
+        mix_gas=Morg_gas_bin;
+        
+        
+else
+    % set organic mass to "zero" if no CC
+    for i=1:num_org
+        Maer(:,1+i)=1e-25;
+        mix_gas(i)=Morg_gas_bin(i);
+    end
+end
+
+
+
+% put a small amount of water on the aerosol - let the solver find
+% equilibrium
+% Mwater is mass of water in each bin at equilibrium at RHInit
+Mwater=1e-22.*ones(num_bins,1);
+for i=1:num_bins
+    % number of moles of each component
+    ns=Maer(i,:)./Ma;
+
+    
+
+    T=TInit;
+    P=PInit;
+    RH=RHInit;
+    Mwater(i)=abs(fzero(@(massw1) equilibriate(massw1,ns,T,P,RH),sum(nu1.*ns).*Mw.*RH./(1-min(RH,0.9)),... 
+        optimset('TolFun',1e-40,'TolX',1e-50,'MaxFunEvals',50000)));
+    % here need to solve for: the mass of each component, including
+    % non-volatile stuff and water.
+end
+%--------------------------------------------------------------------------
+
+% options for the ode solver
+
+% set up arrays to send to functions
+% [H2O, P, T, Z, H2O bins, vap orgs, mass orgs in bins]
+
+% AbsTol:
+% [H2O, P, T, Z, H2O bins]
+abstol=[1e-20; 1; 1e-5; 1e-5; 1e-25.*ones(num_bins,1)];
+if(aer_gas==1|aer_gas==2)
+    % add abstol for org vapour 
+    for i=1:num_org
+        abstol=[abstol;1e-20]; % kg/kg tolerance.
+    end
+    % add abstol for org mass bins
+    for i=1:1+num_org
+        abstol=[abstol;1e-45.*ones(num_bins,1)]; % kgs for each component.
+    end
+end
+
+% Non negative array:
+non_neg=ones(size(abstol));
+
+% Options for solver:
+vopt = odeset('RelTol', 1e-10,'AbsTol',abstol,...
+    'InitialStep',1,'MaxStep',1,'NonNegative',non_neg,'outputfcn',@myplotfun);
+
+% Initial values:
+% [H2O, P, T, Z, H2O bins]
+initial_vals=[RHInit.*Ra./Rv.*SVP(TInit,'buck2','liq')./(PInit-SVP(TInit,'buck2','liq'));... % mixing ratio of water kg/kg
+    PInit; TInit; 0; Mwater]; % Mwater is the mass of water in each bin.
+
+load initial_vals
+
+if tstart==0    % initial step
+    initial_vals=[RHInit.*Ra./Rv.*SVP(TInit,'buck2','liq')./(PInit-SVP(TInit,'buck2','liq'));... % mixing ratio of water kg/kg
+        PInit; TInit; 0; Mwater]; % Mwater is the mass of water in each bin.
+    
+    if(aer_gas==1|aer_gas==2)
+        % add IC for org_vap
+        initial_vals=[initial_vals; mix_gas']; % mixing ratios of each gas component kg/kg.
+        
+        % add IC for mass of organics
+        for i=1:1+num_org
+            initial_vals=[initial_vals; Maer(:,i)]; % mass of each component in each bin.
+        end
+    end
+end
+
+tfinal=10;
+if sum(Morg_cond_bin)>0
+    tfinal=10;
+    if RH>=0.9
+        tfinal=10;
+    end
+end
+% tfinal=300;
+% uz_s=uz;
+% uz=0;
+% [TOUT,YOUT,var] = ode15s(@parcel,[0. tfinal],initial_vals,vopt);
+% 
+% uz=uz_s;
+% aer_gas2=0;
+% tfinal=700./uz;
+% initial_vals=YOUT(end,:);
+disp('Running model...');
+[TOUT,YOUT,var] = ode15s(@parcel,[0:tfinal/100:tfinal],initial_vals,vopt);
+
+% Save N adn RH
+vars.N=N(:,1);
+vars.N_each=N_each;
+vars.D=D;
+vars.RH=YOUT(:,1)./(Ra./Rv.*SVP(YOUT(:,3),'buck2','liq')./(YOUT(:,2)-SVP(YOUT(:,3),'buck2','liq')));
+
+% Calculate aerosol mass and density
+num_comp1=num_comp;
+dry_aerosol_mass=zeros(length(vars.RH),num_bins);
+dry_aerosol_dens=zeros(length(vars.RH),num_bins);
+dry_aerosol_vol=zeros(length(vars.RH),num_bins);
+ns_dry_aerosol=zeros(length(vars.RH),num_bins);
+wet_aerosol_vol=zeros(length(vars.RH),num_bins);
+
+if(aer_gas==0) 
+    dry_aerosol_mass(:,1:num_bins)=dry_aerosol_mass(:,:)+repmat(Maer(:,1),[1 length(vars.RH)])'; 
+    dry_aerosol_dens(:,1:num_bins)=dry_aerosol_dens(:,1:num_bins)+repmat(Maer(:,1),[1 length(vars.RH)])'./rhoa(1);
+else
+    for i=1:1+num_org
+        % ind picks out components of y that correspond to (i-1)^th organic:
+        ind=(4+num_bins+num_org+1:4+num_bins+num_org+num_bins);  % skips over everything that is not organic mass
+        ind=ind+(i-1).*num_bins;  % finds components corresponding to (i-1)^th organic
+        % sum up aerosol mass in the bins, each row corresponds to a time step:
+        dry_aerosol_mass(:,1:num_bins)=dry_aerosol_mass(:,:)+(YOUT(:,ind));
+        % number of moles of dry aerosol, each row corresponds to a time step:
+        ns_dry_aerosol(:,1:num_bins)=ns_dry_aerosol(:,:)+(YOUT(:,ind))./Ma(i);
+        % dry aerosol volume:
+        dry_aerosol_vol(:,1:num_bins)=dry_aerosol_vol(:,1:num_bins)+...
+            (YOUT(:,ind))./rhoa(i);
+    end
+end
+
+wet_aerosol_vol=dry_aerosol_vol+YOUT(:,5:4+num_bins)./rhow;
+vars.wet_aerosol_size=(6.*wet_aerosol_vol./pi).^(1./3);
+
+% Now it becomes a density: ie mass/volume
+dry_aerosol_dens(:,1:num_bins)=dry_aerosol_mass(:,1:num_bins)./dry_aerosol_vol(:,1:num_bins);
+dry_aerosol_size(:,1:num_bins)=(6.*dry_aerosol_vol(:,1:num_bins)./pi).^(1./3);
+vars.dry_aerosol_size=dry_aerosol_size;
+% for minimization routine...
+T=YOUT(:,3);
+P=YOUT(:,2);
+RH=RHInit;
+RHmax=max(vars.RH);
+% save output
+d_crit=0*TOUT;
+for i=1:length(TOUT)
+   mode1=exp(sum(vars.N.*log(dry_aerosol_size(i,1:num_bins)'))./sum(vars.N));
+  
+
+   % calculate if they are actually activated
+   vars.nact(i)=0.;
+   vars.nact_each(i,:)=zeros(1,num_modes);
+   d_crit(i)=vars.D(end,1);
+
+    for k=1:num_bins
+        % Number of moles of core at i^th timestep
+        if num_org==0
+            ns=Maer./Ma;
+        else
+            for j=1:1+num_org
+                ns(j)=YOUT(i,(4+num_bins+num_org+(j-1).*num_bins+k))./Ma(j);
+            end
+        end
+        
+        ns_water=YOUT(i,4+k)./Mw;
+
+        
+        raoult=(ns_water)./(ns_water+sum(ns.*nu1));
+
+            
+        % Calculate the amount of water that a particle with the current Raoult term (given by ns) needs to reach equilibrium
+        % this sometimes does not have a minimum and throws a [] so we save as temp variable
+        temp=fminbnd(@(massw1) equilibriate(massw1,ns,T(i),P(i),RH),0, ...
+            1.4e-11,optimset('TolFun',1e-40,'TolX',1e-50,'MaxFunEvals',50000));
+
+        % Default Mwater to max water across bins
+        Mwater(i)=max(YOUT(i,5:4+k));
+        
+        % Update Mwater if RH has a peak
+        if isempty(temp)==0
+            Mwater(i)=temp;
+        end
+        
+        % Calculate activated fraction based on whether there is more water (ie larger wet diameter) than a particle with critical wet diameter 
+        if(Mwater(i)<YOUT(i,4+k))
+            vars.nact(i)=vars.nact(i)+vars.N(k);
+            vars.nact_each(i,1:num_modes)=vars.nact_each(i,1:num_modes)+vars.N_each(k,1:num_modes);
+        end
+
+    end
+   
+    % calculates change in geometric standard deviation
+    vars.stdev(i)=sqrt(sum(vars.N.*log((dry_aerosol_size(i,1:num_bins)')./(mode1)).^2)./sum(vars.N));
+    % No idea...
+    vars.mode(i)=mode1;
+   
+   
+   
+
+
+
+
+
+    
+
+
+   
+   
+   
+end
+
+
+
+
+% Final aerosol size without water
+vars.diam_end=dry_aerosol_size(end,1:num_bins);
+% Liquid water mixing ratio:
+vars.mass=sum(YOUT(:,5:num_bins+5-1).* ...
+   repmat(vars.N,[1 length(vars.nact)])',2);
+% Total water mixing ratio:
+vars.tot=vars.mass+YOUT(:,1);
+% Temp:
+vars.T=YOUT(:,3);
+% Pressure:
+vars.P=YOUT(:,2);
+% output in per unit vol:
+% vars.nact=vars.nact'.*vars.P./vars.T./Ra;
+% Height:
+vars.Z=YOUT(:,4);
+% Mass of core aerosol bins
+vars.maer=Maer(:,1);
+
+vars.factor=(PInit./Ra./TInit);
+
+
+
+%--------------------------------------------------------------------------
+
+function dy=parcel(t,y)
+%global variables - quick and dirty
+% t
+
+global N_each
+global GRAV;
+global cp;
+global Lv;
+global Rv;
+global Ra;
+global R_gas;
+global Mw;
+global rhow;
+global dd;
+global ka;
+global uz;
+global rhoa;
+global Ma;
+global Maer;
+global mix_gas;
+global num_bins;
+global num_comp;
+global N;
+global RHInit;
+global sigma;
+global aer_gas;
+global aer_gas2;
+global nu1;
+global num_modes
+global num_org
+global here
+global t_checkpoint
+
+
+y=abs(y);
+aer_gas11=min(aer_gas,1);
+% put k=num_bins, l=num_comp-num_modes to agree with notation on
+% http://personalpages.manchester.ac.uk/staff/paul.connolly/projects/foam-pit/foam-pit01.html
+
+% Number of equations is the sum of the k water bins, 4 equations for P, T,
+% rv and uz, then k growth equations for each organic in each bin plus a
+% conservation equation for each organic (k+1)l.
+
+% ----------------------------------------------------------------------
+% Matt_flag: This was here already, wrong size I think?
+% ----------------------------------------------------------------------
+%        water    |P,T,rv,uz    num_comp (growth+conserv) over num_bins bins
+% dy=zeros(num_bins+4+aer_gas11.*(num_comp.*num_bins+num_comp),1);
+% ----------------------------------------------------------------------
+
+% Entries in y are as follows:
+% y=[ drv                                           ]   1
+%   [ P                                             ]   1
+%   [ T                                             ]   1
+%   [ uz                                            ]   1
+%   [ Water in bins (#bins)                         ]   50
+%   [ mix_gas (#of SV)                              ]   num_org
+%   [ Maer of core (#bins) <== DO WE NEED THIS???   ]   50
+%   [ Maer of SV ((#bins x #SV modes)               ]   50*num_org
+
+dy=zeros(4+num_bins+num_org*aer_gas11+aer_gas11.*(1+num_org)*num_bins,1);
+
+% growth of aerosol...
+% Update the mass of each component in each bin
+if(aer_gas==1)
+
+% Extract masses of each component in each bin from y
+    Maer=reshape(y(end+1-(1+num_org)*num_bins:end),num_bins,1+num_org);
+
+end
+
+% Number of moles of each mode
+for i=1:1+num_org
+    ns(:,i)=Maer(:,i)./Ma(i);
+end
+
+RH=SVP(y(3),'buck2','liq').*Ra./Rv./(y(2)-SVP(y(3),'buck2','liq'));
+RH=y(1)./RH;
+RH=RHInit;
+% Water...
+
+dy(5:4+num_bins)=dropgrowth(RH,y(5:5+num_bins-1),ns,y(3),y(2),1,1);
+
+if(aer_gas2==1)
+    for i=1:1+num_org % doesn't actually do anything for i=1
+        if i>1  % don't condense cores
+
+% ----------------------------------------------------------------------                
+% Matt_flag: not sure this was right     
+% ----------------------------------------------------------------------
+
+        % skip is the number of components of y that we need to skip over
+        % to get to get to the ones we want to change. Here it is the first
+        % 4 variables, mass of water in bins, mixing ratio of organics,
+        % mass of core aerosols and previously changed organics in bins
+        skip=4+num_bins+num_org+num_bins*(i-1);
+         
+        ind=(skip+1:skip+num_bins);
+
+        % condense organics one at a time
+        % i-1 is the number of the organic
+        dy(ind)=dropgrowth(y(4+num_bins+i-1),y(5:4+num_bins),ns,y(3),y(2),2,i-1);      
+
+        % roco gas mixing ratio for organics:
+        dy(4+num_bins+i-1)=-sum(N.*dy(ind));
+        
+
+%         if i==7
+%             dy(4+num_bins+i-1);
+%             y(4+num_bins+i-1);
+%         end
+        end
+    end
+end
+
+% roco water vapour mixing ratio:
+drv=0; % change in vapour mass
+
+dy(1)=drv; % change in vapour mass
+dy(2)= 0;% Pressure - hydro static equation.
+dy(3)= 0;% temperature - expansion
+dy(3)=0;% temperature - latent heat
+dy(4)=uz; % height
+t
+
+%min(y(5:5:num_bins-1)),max(y(5:5+num_bins-1))
+
+function dm=dropgrowth(RH,massw,ns,T,P,flag,k)  %need to add a flag here that tells us we are using an organic
+% k is the number of the organic
+% flag is 1 or 2
+% 1 is used for condensing water
+% 2 is used for organics
+
+% global variables - quick and dirty
+global GRAV;
+global cp;
+global Lv;
+global Rv;
+global Ra;
+global R_gas;
+global Mw;
+global rhow;
+global dd;
+global ka;
+global uz;
+global rhoa;
+global Ma;
+global Maer;
+global mix_gas;
+global num_bins;
+global num_comp;
+global N;
+global RHInit;
+global sigma;
+global aer_gas;
+global aer_gas2;
+global num_modes
+
+global log_10_cstar
+global delta_h_vap
+global nu1;
+
+num_org=num_comp-num_modes;
+
+% calculate the diameter and radius of wet particle:
+
+% First calculate the volume of the aerosol particles in each mass bin
+vol_a=massw./rhow;  %volume of water
+for i=1:1+num_org
+    vol_a=vol_a+ns(:,i)*Ma(i)./rhoa(i);  % add on volume of components in aerosol
+end
+
+% Then density =mass/vol
+rhoat=massw./vol_a;
+for i=1:1+num_org
+    rhoat=rhoat+ns(:,i).*Ma(i)./vol_a;
+end
+
+% mass of aerosol in each bin
+mass_a=massw;
+for i=1:1+num_org
+    mass_a=mass_a+ns(:,i)*Ma(i);
+end
+
+Diam=(vol_a.*6./pi).^(1/3);
+% Diam=50e-9;
+
+% A little check, if vol calculated inconsistently and out by an error of more than 1% display error message
+if abs(mass_a./rhoat-vol_a)./vol_a>0.01
+    error('calculated Diam incorrectly around line 720')
+end
+    
+% radius, obvs!
+
+rad=Diam./2;
+
+
+if (flag==1)
+
+% denominator in Raoult term
+mass_tot=massw./Mw;
+for i=1:1+num_org
+    mass_tot=mass_tot+ns(:,i).*nu1(i);
+end
+
+RHeq=exp(4.*Mw.*sigma./R_gas./T./rhoat./Diam).*(massw./Mw)./(mass_tot);
+
+% drop growth rate+++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+% Probably dd, and ka need to be different for every component. Also SVP
+% (Pa)
+% needs to be the pure component vapour pressure. You'd probably set Lv to
+% zero for anything other than water condensation.
+
+
+% Don't use dd as a function: Quicker...
+dd=2.11e-5.*(T./273.15).^1.94.*(101325./P);
+ka=(5.69+0.017.*(T-273.15)).*1e-3.*4.187;
+satvap=svp(T,'buck2','liq');
+temp=dd.*Lv.*RHeq.*SVP(T,'buck2','liq').*rhow./ka./T.*(Lv.*Mw./T./R_gas-1);
+temp=temp+rhow.*R_gas.*T./Mw;
+temp=dd.*(RH-RHeq).*SVP(T,'buck2','liq')./rad./temp;
+
+x=SVP(T,'buck2','liq');
+x=1;
+dm=temp.*2.*pi./2.*rhoat.*Diam.^2;
+
+elseif flag==2   % Now condense organics
+
+% NB: Ma is a vector of molecular masses including the value for the cores. Hence we need Ma(k+1) for the organics    
+Molw_org=Ma(k+1);    
+    
+% Denominator of Raoult term
+mass_tot=massw./Mw;
+for i=1:1+num_org
+    mass_tot=mass_tot+ns(:,i).*nu1(i);
+end
+% global wtf mass_tot_wtf
+% 
+% wtf=mass_tot-mass_tot_wtf;
+% mass_tot_wtf=mass_tot;
+% if -min(min(wtf))>1e-20
+%     here=1
+% end
+
+% mass_tot=mass_tot-ns(:,1).*nu1(1)+ns(26).*nu1(1);
+
+% mass_tot=0.1e-16+0*mass_tot;
+%exp(4.*Molw_org.*sigma./R_gas./T./rhoat./Diam).*
+RHeq=exp(4.*Molw_org.*sigma./R_gas./T./rhoat./Diam).*(ns(:,k+1).*nu1(k+1))./(mass_tot);
+% ns(1:10,2);
+% mass_tot(1:10);
+% RHeq(1:10);
+
+
+%dont forget, we have to convert the concentration of organic in the gas
+%phase into a 'RH' equivalent. To do this we can use the ideal gas law.
+%Here we are passing the kg/kg so lets convert that back - P/(RaT)
+%back to micrograms per cubic metre - 1e9
+num_moles_org=RH*((P./Ra./T)/(1d-9)); 
+% moles per unit volume, 1e-6: micrograms -> g, 1e3: kg/mole -> g/mole
+num_moles_org=num_moles_org*(1d-6)/(Molw_org*1d3);
+% using the ideal gas law, the actual vapour pressure (for 1m3 (1d3 litres))
+Porg=((num_moles_org*8.314*T)); %in Pa
+
+%now need to have the saturation vapour pressure for each compound
+if (k==0)
+    % We probably never run this part but just in case we neglect the core and don't condense it
+    SVP_org=0;%Ammonium sulphate
+    RH_new=0;
+elseif (k>0)
+    % k should be between 1 and 10 (NB: the input is i-1 and i runs from 2 to 11)
+    c_star=10.^(log_10_cstar(k));
+    P_i_o_atm=(c_star.*298.15*8.2057d-5)/((Molw_org*1d3)*1d6);
+    SVP_org=P_i_o_atm*(exp(delta_h_vap(k)/8.314d-3*(1/(298.15)-1/(T))))*1d5;
+    RH_new=Porg/SVP_org;
+end
+k;
+RH_new;
+% if k==6
+%     RH_new
+%     RHeq(1:10)
+% end
+
+% drop growth rate+++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+% Probably dd, and ka need to be different for every component. Also SVP
+% (Pa) -  at the moment, have only changed the saturation vapour pressure
+% needs to be the pure component vapour pressure. You'd probably set Lv to
+% zero for anything other than water condensation.
+
+% temp=dd(T,P).*0.*RHeq.*SVP_org.*rhow./ka(T)./T.*(Lv.*Mw./T./R_gas-1);
+% temp=temp+rhow.*R_gas.*T./Molw_org;
+% temp=dd(T,P).*(RH_new-RHeq).*SVP_org./rad./temp;
+
+% [rad(10)*RHeq(10),rad(40)*RHeq(40)];
+% if (rad(40)*RHeq(40))./(rad(10)*RHeq(10))>2
+% RH_new-[RHeq(10),RHeq(40)]
+% end
+
+% Don't use dd as a function: Quicker...
+dd=2.11e-5.*(T./273.15).^1.94.*(101325./P);
+% NB: Ma is a vector of molecular masses including the value for the cores. Hence we need Ma(k+1) for the organics 
+dm=4.*pi.*rad.*dd.*(RH_new-RHeq).*SVP_org./(R_gas./Ma(k+1).*T);
+dm(find(~isfinite(dm)))=0;
+if min(dm)<0
+    here=1;
+end
+end
+
+%--------------------------------------------------------------------------
+
+function f=equilibriate(massw1,ns,T,P,RH)
+% global variables - quick and dirty
+global GRAV;
+global cp;
+global Lv;
+global Rv;
+global Ra;
+global R_gas;
+global Mw;
+global rhow;
+global dd;
+global ka;
+global uz;
+global rhoa;
+global Ma;
+global Maer;
+global mix_gas;
+global num_bins;
+global num_comp;
+global N;
+global RHInit;
+global sigma;
+global aer_gas;
+global aer_gas2;
+global nu1;
+massw1=abs(massw1);
+
+% total volume of particles
+volt=massw1./rhow+sum(ns.*Ma./rhoa);
+% average density of particles
+rhoat=(massw1+sum(ns.*Ma))./volt;
+% diameter assuming identical homogeneous spherical particles
+Diam=((massw1+sum(ns.*Ma)).*6./(pi.*rhoat)).^(1./3);
+% radius, obvs.
+rad=Diam./2;
+
+% equilibrium RH
+RHeq=exp(4.*Mw.*sigma./R_gas./T./rhoat./Diam).*(massw1./Mw)./(massw1./Mw+sum(ns.*nu1));
+
+% iterate water content of particles until in equilibrium
+f=RH-RHeq;
+
+
+
+function status = myplotfun(t,y,flag)
+global time1;
+if(t>time1+10);
+    time1=time1+10;
+     disp(['Time: ',num2str(t)]);
+end
+status=0.;
+
+
+
+
+
+
+
+
+
+function pi=SVP(T,flag,flag2)
+%usage: SVPIce(T,flag,flag2);
+% flag='marti'
+% flag='teten'
+% flag2='ice'
+% flag2='liq'
+
+
+switch lower(flag2)
+case 'ice'
+    switch lower(flag)
+    case 'buck2'
+        pi = 100.*6.1115 .* exp((23.036 - (T-273.15)./ 333.7) .*(T-273.15) ./ (279.82 + (T-273.15)))  ;
+    case 'buck'
+        pi = 100.*6.1115 .* exp(22.452 .* (T-273.15) ./ (272.55+(T-273)));  
+
+    case 'goff'
+        pi =  100.*10.^(-9.09718.* (273.16./T - 1)       ...                                 
+                   - 3.56654 .*log10(273.16./ T) ...
+                   + 0.876793 .*(1 - T./ 273.16) ...
+                   + log10(6.1071) );
+        
+    case 'marti'
+        pi = 10.^((-2663.5 ./ T) + 12.537 );   
+    case 'teten'
+        pi = 100.*10.^(9.5 .*(T-273.15) ./ (T-273.15+265.5) + 0.7858  ) ;  
+    case 'hyland'
+        pi =  exp(-0.56745359e4 ./ T     ...                                            
+              + 0.63925247e1 ...
+              - 0.96778430e-2 .*T ...
+             + 0.62215701e-6 .*T.^2 ...
+             + 0.20747825e-8 .*T.^3 ...
+             - 0.94840240e-12 .*T.^4 ...
+             + 0.41635019e1 .*log(T) );
+    case 'murphy'
+        pi = exp(9.554605 - 5722.796./T + 3.5291623.*log(T) - 0.00727374.*T);
+    case 'magnus'
+        pi=610.7.*exp((22.44.*T-6.1186e3)./(T-0.75));
+    case 'clausius'
+        pi=611.73.*exp(2.501e6./461.5.*(1./273.16-1./T));
+    otherwise
+        error('invalid');
+    end
+case 'liq'
+    switch lower(flag)
+    case 'goff'
+        pi =  100.*10.^(-7.90298 .*(373.16./T-1)    ...                       
+                    + 5.02808 .*log10(373.16./T) ...
+                    - 1.3816e-7 .*(10.^(11.344 .*(1-T./373.16))  -1) ...
+                   + 8.1328e-3 .*(10.^(-3.49149 .*(373.16./T-1))  -1) ...
+                   + log10(1013.246) );
+        
+    case 'bolton'
+        pi = 100.*6.112 .*exp(17.67 .* (T-273.15) ./ (T-273.15+243.5));
+    case 'roger'
+        pi = 2.53e11 * exp(-5.42e3./(T));
+    case 'buck2'
+        pi = 100.*6.1121  .*exp((18.678 - (T-273.15)./ 234.5).* (T-273.15) ./ (257.14 + (T-273.15)));
+    case 'buck1'
+        pi = 100.*6.1121 .*exp(17.502 .*(T-273.15)./ (240.97 + T-273.15));
+
+    case 'wmo'
+        pi = 100.*10.^( 10.79574 .*(1-273.16./T)        ...                       
+                    - 5.02800 .*log10(T./273.16) ...
+                    + 1.50475e-4 .*(1 - 10.*(-8.2969.*(T./273.16-1))) ...
+                    + 0.42873e-3 .*(10.*(+4.76955.*(1-273.16./T)) - 1) ...
+                    + 0.78614 );
+    case 'hyland'
+        pi =  exp(-0.58002206e4 ./ T  ...                                     
+              + 0.13914993e1 ...
+              - 0.48640239e-1 .* T ...
+              + 0.41764768e-4 .* T.^2 ...
+              - 0.14452093e-7 .* T.^3 ...
+              + 0.65459673e1 .* log(T)); 
+            
+    case 'sonntag'
+        pi =  100.*exp(-6096.9385 ./ T  ...                        
+                 + 16.635794 ...
+                 - 2.711193e-2 .* T ...
+                 + 1.673952e-5 .* T.^2 ... 
+                 + 2.433502 .* log(T)); 
+    case 'teten'
+        pi = 100.*10.^(7.5 .*(T-273.15) ./ (T-273.15+237.3) + 0.7858  ) ;  
+    case 'clausius'
+        pi=611.73.*exp(2.834e6./461.5.*(1./273.16-1./T));
+    case 'magnus'
+        pi=610.7.*exp((17.38.*T-4.7473e3)./(T-34.15));
+    otherwise
+        error('invalid');
+    end
+end  
